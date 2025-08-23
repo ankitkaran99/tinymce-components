@@ -1,16 +1,31 @@
 # Component System Documentation
 
-This documentation explains how to create and manage components within the TinyMCE editor using the component system.
+A powerful component system for TinyMCE that enables building complex, reusable UI components with a drag-and-drop interface.
 
 ## Table of Contents
 - [Creating a Component](#creating-a-component)
 - [Component Manager Initialization](#component-manager-initialization)
-- [Adding Components](#adding-components)
+- [Built-in Components](#built-in-components)
+- [Adding Custom Components](#adding-custom-components)
+- [Layers Component](#layers-component)
 - [Best Practices](#best-practices)
+- [Troubleshooting](#troubleshooting)
 
 ## Creating a Component
 
 Components are created using the `Component` class constructor. Here's a comprehensive guide to all component properties and lifecycle methods:
+
+### Basic Example
+
+```javascript
+new Component({
+  id: "my-component",
+  name: "My Component",
+  icon: "<i class='bi bi-box'></i>",
+  category: "Layout",
+  content: () => `<div>My Component Content</div>`
+});
+```
 
 ```javascript
 const myComponent = new Component({
@@ -142,7 +157,43 @@ properties: {
 }
 ```
 
-### Component Behavior
+### Built-in Components
+
+### Layers Container
+A powerful component for creating layered content:
+
+```javascript
+new Component({
+  id: "layers-container",
+  name: "Layers",
+  category: "Layout",
+  properties: {
+    addLayer: { type: 'button', label: 'Add New Layer' },
+    removeLayer: { type: 'button', label: 'Remove Current Layer' },
+    activeLayer: {
+      type: 'select',
+      label: 'Active Layer',
+      options: [],
+      default: ''
+    }
+  },
+  editorStyle: `
+    .cm-layers-container {
+      min-height: 100px;
+      height: 200px;
+      min-width: 200px;
+      border: 1px dashed #ccc;
+      resize: both;
+      overflow: auto;
+    }
+    .cm-layer { position: absolute; }
+    .cm-layer.cm-active { border: 1px solid #0d6efd; }
+    .cm-layer.cm-inactive { opacity: 0.3; }
+  `
+});
+```
+
+## Component Behavior
 
 1. **allowed**
    - Array of component IDs that can be placed inside this component
@@ -500,6 +551,23 @@ The component system includes error handling for:
 - Invalid property types
 - Invalid drop targets
 - Property update failures
+
+## Performance Optimization
+
+1. **Minimize DOM Manipulations**
+   - Use `requestAnimationFrame` for animations
+   - Batch DOM updates when possible
+   - Use event delegation for dynamic content
+
+2. **Memory Management**
+   - Remove event listeners in `onRemove`
+   - Clean up any timers or intervals
+   - Use weak references where appropriate
+
+3. **Layer Management**
+   - Limit the number of active layers
+   - Use `pointer-events: none` for inactive layers
+   - Optimize layer content for performance
 
 ## Custom Styles
 

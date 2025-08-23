@@ -547,24 +547,19 @@ class ComponentsManager {
               }
             );
           }
-
-          // Reinitialize child components if any
-          if (component.children) {
-            const instanceId = element.getAttribute("data-instance-id");
-            this._addChildComponents(component, element, instanceId);
-          }
-
-          // Call onInsert to restore component behavior with current properties
-          if (typeof component.onInsert === "function") {
-            // Get current properties from data attributes
-            const currentProps = component.properties
-              ? this._getPropertiesFromElement(element, component.properties)
-              : {};
-
-            // Call onInsert with the current properties
-            component.onInsert(this.editor, element, currentProps);
-          }
         }
+      });
+
+      // non component elements
+      const nonComponentElements = this.editor.dom.select("body :not([data-component])");
+      nonComponentElements.forEach((el) => {
+        el.setAttribute('draggable', 'true');
+
+        el.addEventListener('dragstart', (ev) => {
+          el.classList.add('dragging');
+          ev.dropEffect = 'move';
+          ev.stopPropagation();
+        });
       });
     } catch (error) {
       console.error("Error reinitializing components:", error);
@@ -648,15 +643,6 @@ class ComponentsManager {
 
           el.addEventListener('dragstart', (ev) => {
             el.classList.add('dragging');
-
-            if(el.hasAttribute("data-component-id")){
-              ev.dataTransfer.setData("application/x-component-id", el.getAttribute("data-component-id"));
-            }
-
-            if(el.hasAttribute("data-instance-id")){
-              ev.dataTransfer.setData("application/x-component-instance-id", el.getAttribute("data-instance-id"));
-            }
-            
             ev.dropEffect = 'move';
             ev.stopPropagation();
           });
@@ -728,8 +714,16 @@ class ComponentsManager {
     });
 
     // Handle drag leave
-    this.editor.on("dragleave", (e) => {
-      this.removePlaceholder();
+    this.editor.on("dragend", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      setTimeout(() => {
+        this.selectedElement ? this.selectedElement.classList.remove('dragging') : null;
+        this.removePlaceholder();
+      }, 500)
+
+      return false;
     });
 
     // Handle drop
@@ -748,7 +742,6 @@ class ComponentsManager {
 
         componentElement = doc.querySelector('[data-instance-id="' + instanceId + '"]');
         this.placeholder.replaceWith(componentElement);
-        componentElement.classList.remove('dragging');
       } else if(componentId) {
         const component = this.getComponent(componentId);
         
@@ -761,13 +754,14 @@ class ComponentsManager {
       } else {
         // normal html elements
         try {
-          if (this.placeholder && !this.placeholder.contains(e.target)) {
-            this.placeholder.replaceWith(e.target);
+          if (this.placeholder && this.selectedElement && doc.querySelector('body').contains(this.selectedElement)) {
+            this.placeholder.replaceWith(this.selectedElement);
           }
         } catch (error) {
           console.error('Error during drop:', error);
         } finally {
           this.removePlaceholder();
+          doc.querySelector('.dragging') ? doc.querySelector('.dragging').remove() : null;
         }
       }
 
@@ -785,7 +779,7 @@ class ComponentsManager {
 
         return false;
       }
-    }, true);
+    }, true); 
   }
 
   /**
@@ -902,6 +896,9 @@ class ComponentsManager {
     Object.entries(component.properties).forEach(([key, prop]) => {
       props[key] = prop.value !== undefined ? prop.value : prop.default;
       // Save property to data attribute
+      if(typeof props[key] === 'undefined'){
+        return;
+      }
       rootElement.setAttribute(`data-prop-${key}`, props[key]);
     });
     
@@ -933,6 +930,8 @@ class ComponentsManager {
     if (typeof component.onInsert === 'function' && rootElement) {
       component.onInsert(this.editor, rootElement, component);
     }
+
+    this.makeComponentDraggable(rootElement);
 
     return rootElement;
   }
@@ -1009,9 +1008,21 @@ class ComponentsManager {
         });
       }
     });
-    
-    // Trigger change event when done
-    this.editor.dispatch('change');
+  }
+
+  /**
+   * Make a component draggable
+   * @private
+   */
+  makeComponentDraggable(componentElement) {
+    componentElement.setAttribute('draggable', 'true');
+
+    componentElement.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-component-instance-id', componentElement.getAttribute('data-instance-id') || 'component');
+      e.dataTransfer.setData('application/x-component-id', componentElement.getAttribute('data-component') || 'component');
+      e.dropEffect = 'move';
+      e.stopPropagation();
+    });
   }
 
   /**
@@ -1046,11 +1057,10 @@ class ComponentsManager {
 
       // Find the closest component element if this is a child of a component
       let selectedElement = element;
-      const componentElement = element.closest("[data-component]");
 
       // If we found a component element and we're not already selecting it
-      if (componentElement && componentElement !== element) {
-        selectedElement = componentElement;
+      if (element.hasAttribute("data-component") && selectedElement !== element) {
+        selectedElement = element;
       }
 
       // Update the selected element
@@ -2746,6 +2756,10 @@ class ComponentsManager {
       currentValue = prop.default ?? "";
     }
 
+    if (typeof prop.beforeInit === "function") {
+      prop = prop.beforeInit(this.selectedElement, prop);
+    }
+
     // Create different input types based on the property type
     switch (prop.type) {
       case "select":
@@ -2909,6 +2923,52 @@ class ComponentsManager {
         });
         break;
 
+      case "button":
+        field.innerHTML = `
+          <button data-property="${prop.name}">${prop.label || prop.name}</button>
+        `;
+
+        field.querySelector("button").addEventListener("click", (e) => {
+          const propName = prop.name;
+
+          // Call onUpdate if defined to handle any custom update logic
+          if (typeof component.onUpdate === "function") {
+            component.onUpdate(propName, null, this.selectedElement, prop);
+          }
+
+          // Notify the editor that the content has changed
+          this.editor.nodeChanged();
+
+          // Force a re-render of the properties panel
+          this.updatePropertiesPanel();
+        });
+        break;
+
+      case "hidden":
+        field.innerHTML = `
+          <input type="hidden" data-property="${prop.name}" value="${currentValue || ""}">
+        `;
+
+        field.querySelector("input").addEventListener("change", (e) => {
+          const newValue = e.target.value;
+          const propName = prop.name;
+
+          // Save the property to the element's data attribute
+          this._savePropertyToElement(this.selectedElement, propName, newValue);
+
+          // Call onUpdate if defined to handle any custom update logic
+          if (typeof component.onUpdate === "function") {
+            component.onUpdate(propName, newValue, this.selectedElement, prop);
+          }
+
+          // Notify the editor that the content has changed
+          this.editor.nodeChanged();
+
+          // Force a re-render of the properties panel
+          this.updatePropertiesPanel();
+        });
+        break;
+
       default:
         return null; // Unsupported type
     }
@@ -2917,9 +2977,394 @@ class ComponentsManager {
   }
 }
 
+function cm_essentials_init(componentsManager){
+  componentsManager.register(
+    new Component({
+      id: "layers-container",
+      name: "Layers",
+      icon: "",
+      category: "Layout",
+      editorStyle: `
+        .cm-layers-container {
+          position: relative;
+          min-height: 100px;
+          height: 200px;
+          min-width: 200px;
+          box-sizing: border-box;
+          border: 1px dashed #ccc;
+          outline: 2px solid transparent;
+          transition: outline 0.2s ease;
+          padding: 10px;
+          user-select: none;
+          resize: both;
+          overflow: auto;
+        }
+        
+        /* Prevent drag operations on the resize handle */
+        .cm-layers-container::-webkit-resizer {
+          background: transparent;
+        }
+        
+        .cm-layers-container:not(:focus):hover {
+          outline: 2px solid #0d6efd;
+          outline-offset: 2px;
+        }
+        
+        .cm-layers-container:focus {
+          outline: 2px solid #0d6efd;
+          outline-offset: 2px;
+        }
+        
+        .cm-layers-container.cm-selected {
+          outline: 2px solid #0d6efd !important;
+          outline-offset: 2px;
+        }
+  
+        .cm-layers-content {
+          position: relative;
+          width: 100%;
+          height: 100%;
+          min-height: 50px;
+          box-sizing: border-box;
+          pointer-events: none;
+          user-select: none;
+          overflow: hidden;
+        }
+        
+        .cm-layers-content > * {
+          user-select: none;
+        }
+  
+        .cm-layer {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          transition: all 0.2s ease-in-out;
+          box-sizing: border-box;
+          border: 1px solid transparent;
+          background-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .cm-layer:hover {
+          border: 1px dashed #0d6efd;
+        }
+        
+        .cm-layer.cm-active {
+          border: 1px solid #0d6efd;
+          background-color: rgba(13, 110, 253, 0.05);
+          pointer-events: auto;
+        }
+        
+        .cm-layer.cm-inactive {
+          pointer-events: none;
+          opacity: 0.3;
+        }
+      `,
+      content: (props) => {
+        const containerId = `layers-${Math.random().toString(36).substr(2, 9)}`;
+        return `
+          <div id="${containerId}" class="cm-layers-container" contenteditable="false">
+            <div class="cm-layers-content" draggable="false" contenteditable="false" style="position: relative;">
+              <!-- Layers will be rendered here -->
+            </div>
+
+          </div>
+        `;
+      },
+      properties: {
+        addLayer: {
+          type: 'button',
+          label: 'Add New Layer',
+        },
+        removeLayer: {
+          type: 'button',
+          label: 'Remove Current Layer',
+        },
+        layerUp: {
+          type: 'button',
+          label: 'Move Layer Up',
+        },
+        layerDown: {
+          type: 'button',
+          label: 'Move Layer Down',
+        },
+        activeLayer: {
+          type: 'select',
+          label: 'Active Layer',
+          options: [],
+          default: '',
+          beforeInit: function(element, prop) {
+            prop.options = [];
+  
+            element.querySelectorAll('.cm-layers-content > .cm-layer').forEach((layer) => {
+              prop.options.push({
+                value: layer.style.zIndex,
+                label: `Layer ${layer.style.zIndex}`
+              });
+            });
+  
+            return prop;
+          }
+        },
+      },
+      onUpdate: function(propName, newValue, element, prop) {
+        if(propName == 'addLayer'){
+          if(element.addLayer){
+            element.addLayer()
+          }
+        } else if(propName == 'removeLayer'){
+          if(element.removeLayer){
+            element.removeLayer()
+          }
+        } else if(propName == 'activeLayer'){
+          if (!isNaN(newValue) && element.setActiveLayerIndex) {
+            element.setActiveLayerIndex(newValue);
+          }
+        } else if(propName == 'layerUp'){
+          if (element.moveLayer) {
+            element.moveLayer('up')
+          }
+        } else if(propName == 'layerDown'){
+          if (element.moveLayer) {
+            element.moveLayer('down')
+          }
+        }
+      },
+      onInsert: function(editor, element) {
+        // Make the container focusable
+        element.setAttribute('tabindex', '0');
+        
+        const layersContent = element.querySelector('.cm-layers-content');
+        let layers = {};
+        let activeLayerIndex = -1;
+        let isResizing = false;
+        
+        // Prevent drag operations during resize
+        element.addEventListener('mousedown', function(e) {
+          // Check if the click is on the resize handle (bottom-right 20x20px area)
+          const rect = element.getBoundingClientRect();
+          const isResizeHandle = 
+            e.clientX > rect.right - 20 && 
+            e.clientY > rect.bottom - 20;
+            
+          if (isResizeHandle) {
+            isResizing = true;
+            e.stopPropagation();
+            return false;
+          }
+
+          return true;
+        });
+        
+        // Reset resize flag when mouse is released
+        document.addEventListener('mouseup', function() {
+          isResizing = false;
+        });
+        
+        // Prevent drag operations during resize
+        element.addEventListener('dragstart', function(e) {
+          if (isResizing) {
+            e.preventDefault();
+            return false;
+          }
+        });
+        
+        // Initialize existing layers
+        layersContent.querySelectorAll('.cm-layer').forEach((layer) => {
+          const zIndex = parseInt(layer.style.zIndex || '0', 10);
+          layers[zIndex] = layer;
+          layer.classList.add('cm-inactive');
+        });
+        
+        // Set initial active layer
+        try {
+          activeLayerIndex = parseInt(element.getAttribute('data-prop-activelayer') || '-1', 10);
+          if (isNaN(activeLayerIndex) || activeLayerIndex < 0 || !layers[activeLayerIndex]) {
+            // Find the highest z-index layer
+            const indices = Object.keys(layers).map(Number).sort((a, b) => b - a);
+            activeLayerIndex = indices.length > 0 ? indices[0] : -1;
+          }
+        } catch (e) {
+          console.error('Error initializing layers:', e);
+          activeLayerIndex = Object.keys(layers).length > 0 ? 0 : -1;
+        }
+  
+        function makeCurrentLayerActive() {
+          Object.values(layers).forEach((layer) => {
+            layer.classList.remove('cm-active');
+            layer.classList.add('cm-inactive');
+          });
+          
+          if (layers[activeLayerIndex]) {
+            layers[activeLayerIndex].classList.remove('cm-inactive');
+            layers[activeLayerIndex].classList.add('cm-active');
+            element.setAttribute('data-prop-activelayer', activeLayerIndex);
+          }
+        }
+        
+        function addLayer() {
+          let zIndex = 1;
+          while(layers[zIndex]) zIndex++;
+          
+          const layerEl = document.createElement('div');
+          layerEl.className = 'cm-layer cm-inactive';
+          layerEl.style.zIndex = zIndex;
+          layerEl.style.top = '0';
+          layerEl.style.left = '0';
+          layerEl.style.width = '100%';
+          layerEl.style.height = '100%';
+          layerEl.style.position = 'absolute';
+          layerEl.setAttribute('draggable', 'false');
+          layerEl.setAttribute('contenteditable', 'true')
+          layerEl.setAttribute('data-layer-index', zIndex);
+          
+          layerEl.innerHTML = '<p>Layer ' + zIndex + '</p>'
+          
+          layers[zIndex] = layerEl;
+          layersContent.appendChild(layerEl);
+          
+          // Set the new layer as active
+          activeLayerIndex = zIndex;
+          makeCurrentLayerActive();
+          
+          return layerEl;
+        }
+  
+        function removeLayer() {
+          if (activeLayerIndex === -1) return;
+          
+          // Store the current active index before removal
+          const currentIndex = activeLayerIndex;
+          
+          // Remove the current layer
+          const layer = layers[activeLayerIndex];
+          delete layers[activeLayerIndex];
+          layer.remove();
+  
+          if (layers.length === 0) {
+            activeLayerIndex = -1;
+          } else {
+            activeLayerIndex = null;
+  
+            for(var zIndex in layers){
+              if(zIndex < currentIndex){
+                activeLayerIndex = zIndex;
+                break;
+              }
+            }
+  
+            if(activeLayerIndex == null){
+              for(var zIndex in layers){
+                if(zIndex > currentIndex){
+                  activeLayerIndex = zIndex;
+                  break;
+                }
+              }
+            }
+  
+            if(activeLayerIndex == null){
+              activeLayerIndex = -1;
+            }
+          }
+          
+          makeCurrentLayerActive()
+        }
+  
+        function moveLayer(direction) {
+          if (activeLayerIndex === -1) return;
+          
+          var prevLayerData = null;
+          var currLayerData = null;
+          var nextLayerData = null;
+          var nextFlag = 0;
+  
+          for(zIndex in layers){
+            if(zIndex == activeLayerIndex){
+              currLayerData = {
+                index: zIndex,
+                element: layers[zIndex]
+              };
+  
+              nextFlag = 1;
+            } else if(nextFlag == 1){
+              nextLayerData = {
+                index: zIndex,
+                element: layers[zIndex]
+              };
+            } else {
+              prevLayerData = {
+                index: zIndex,
+                element: layers[zIndex]
+              };
+            }
+            
+            if(currLayerData){
+              if(direction == 'up'){
+                if(nextFlag == 1){
+                  if(!nextLayerData){ return; }
+                  layers[currLayerData.index] = nextLayerData.element;
+                  layers[nextLayerData.index] = currLayerData.element;  
+                  layers[currLayerData.index].style.zIndex = nextLayerData.index;
+                  layers[nextLayerData.index].style.zIndex = currLayerData.index;
+                  break;
+                }
+              } else {
+                if(!prevLayerData){ return; }
+                layers[currLayerData.index] = prevLayerData.element;
+                layers[prevLayerData.index] = currLayerData.element;  
+                layers[currLayerData.index].style.zIndex = prevLayerData.index;
+                layers[prevLayerData.index].style.zIndex = currLayerData.index;
+              }
+            }
+          }
+        }
+  
+        // Initialize with one layer if empty
+        if (Object.keys(layers).length === 0) {
+          addLayer();
+          addLayer();
+        }
+        
+        // Expose methods to the element for property panel to use
+        element.addLayer = addLayer;
+        element.removeLayer = removeLayer;
+        element.moveLayer = moveLayer;
+        element.getActiveLayerIndex = () => activeLayerIndex;
+        element.setActiveLayerIndex = (index) => {
+          if (layers[index]) {
+            activeLayerIndex = index;
+            makeCurrentLayerActive();
+          }
+        };
+        
+        // Update the properties panel when layers change
+        const updateLayerProperties = () => {
+          if (element.updateProperty) {
+            const options = Object.keys(layers).map(zIndex => ({
+              value: zIndex,
+              label: `Layer ${zIndex}`
+            }));
+            
+            element.updateProperty('activeLayer', {
+              options,
+              value: activeLayerIndex
+            });
+          }
+        };
+        
+        // Initial properties update
+        updateLayerProperties();
+      }
+    })
+  );
+}
+
 // Export for CommonJS and browser environments
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { ComponentsManager };
+  module.exports = { ComponentsManager, cm_essentials_init };
 } else if (typeof window !== "undefined") {
   window.ComponentsManager = ComponentsManager;
+  window.cm_essentials_init = cm_essentials_init;
 }
