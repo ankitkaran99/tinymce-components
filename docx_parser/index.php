@@ -8,7 +8,7 @@ function convertDocxToHtml($inputFile, $outputDir) {
     }
 
     // Command to convert DOCX to HTML
-    $command = "libreoffice --headless --convert-to html:HTML --outdir \"$outputDir\" \"$inputFile\" 2>&1";
+    $command = "libreoffice --headless --convert-to 'html:HTML' --outdir \"$outputDir\" \"$inputFile\" 2>&1";
     exec($command, $output, $returnVar);
 
     if ($returnVar !== 0) {
@@ -24,75 +24,232 @@ function convertDocxToHtml($inputFile, $outputDir) {
     return $htmlFiles[0];
 }
 
-// Function to process a single element and its children
-function processElement($element, $dom, $inheritedStyles = []) {
-    if (!$element->hasChildNodes()) {
-        return $inheritedStyles;
-    }
-
-    $children = [];
-    // First, collect all child nodes
-    while ($element->firstChild) {
-        $children[] = $element->firstChild;
-        $element->removeChild($element->firstChild);
-    }
-
-    // Get current element's styles
-    $style = $element->getAttribute('style');
-    $color = $element->getAttribute('color');
-    $face = $element->getAttribute('face');
-    $size = $element->getAttribute('size');
+/**
+ * Merge styles from two elements
+ */
+function mergeStyles($style1, $style2) {
+    if (empty($style1)) return $style2;
+    if (empty($style2)) return $style1;
     
-    // Create style string from attributes
-    $currentStyles = $inheritedStyles;
-    if ($style) $currentStyles[] = $style;
-    if ($color) $currentStyles[] = "color: $color";
-    if ($face) $currentStyles[] = "font-family: $face";
-    if ($size) {
-        $size = intval($size);
-        if ($size > 0) {
-            $pixelSize = $size * 4 / 3;
-            $currentStyles[] = "font-size: {$pixelSize}px";
+    // Parse styles into associative array
+    $styles1 = [];
+    $styles2 = [];
+    
+    foreach (explode(';', $style1) as $style) {
+        if (strpos($style, ':') !== false) {
+            list($prop, $value) = explode(':', $style, 2);
+            $styles1[trim($prop)] = trim($value);
         }
     }
+    
+    foreach (explode(';', $style2) as $style) {
+        if (strpos($style, ':') !== false) {
+            list($prop, $value) = explode(':', $style, 2);
+            $styles2[trim($prop)] = trim($value);
+        }
+    }
+    
+    // Merge styles (styles2 will override styles1)
+    $merged = array_merge($styles1, $styles2);
+    
+    // Convert back to string
+    $result = [];
+    foreach ($merged as $prop => $value) {
+        $result[] = "$prop: $value";
+    }
+    
+    return implode('; ', $result);
+}
 
-    foreach ($children as $child) {
-        if ($child->nodeType === XML_TEXT_NODE) {
-            if (!empty($currentStyles)) {
-                $span = $dom->createElement('span');
-                $span->setAttribute('style', implode('; ', $currentStyles));
-                $element->appendChild($span);
-                $span->appendChild($child);
-            } else {
-                $element->appendChild($child);
-            }
+function mergeNestedFonts($dom) {
+    $xpath = new DOMXPath($dom);
+    
+    // Find all font elements that have a non-font parent
+    $fonts = $xpath->query('//font[not(ancestor::font)]/descendant-or-self::font');
+    
+    // Process fonts from deepest to shallowest
+    $fontsToProcess = [];
+    foreach ($fonts as $font) {
+        $fontsToProcess[] = $font;
+    }
+    
+    // Sort by depth (deepest first)
+    usort($fontsToProcess, function($a, $b) {
+        return getNodeDepth($b) - getNodeDepth($a);
+    });
+    
+    foreach ($fontsToProcess as $font) {
+        $parent = $font->parentNode;
+        
+        // Skip if parent is not an element node
+        if ($parent->nodeType !== XML_ELEMENT_NODE) continue;
+        
+        // Get styles
+        $parentStyle = $parent->hasAttribute('style') ? $parent->getAttribute('style') : '';
+
+        if($font->hasAttribute('style')){
+            $fontStyle = $font->getAttribute('style');
+        } else if($font->hasAttribute('color')) {
+            $fontStyle = 'color: ' . $font->getAttribute('color') . ';';
+        } else if($font->hasAttribute('size')) {
+            $fontStyle = 'font-size: ' . $font->getAttribute('size') . ';';
+        } else if($font->hasAttribute('face')) {
+            $fontStyle = 'font-family: ' . $font->getAttribute('face') . ';';
         } else {
-            $element->appendChild($child);
-            if ($child->tagName === 'font' || $child->tagName === 'span') {
-                // Process child elements with current styles
-                processElement($child, $dom, $currentStyles);
-            }
+            $fontStyle = '';
         }
-    }
-
-    // If this was a font/span, move its children up and remove it
-    $tagName = strtolower($element->tagName);
-    if (($tagName === 'font' || $tagName === 'span') && $element->parentNode) {
-        while ($element->firstChild) {
-            $child = $element->firstChild;
-            $element->parentNode->insertBefore($child, $element);
+        
+        // Merge content
+        $fragment = $dom->createDocumentFragment();
+        while ($font->childNodes->length > 0) {
+            $fragment->appendChild($font->firstChild);
         }
-        $element->parentNode->removeChild($element);
+        
+        // Replace font with its children
+        $font->parentNode->replaceChild($fragment, $font);
+        
+        // Merge styles if needed
+        if (!empty($fontStyle)) {
+            $mergedStyle = mergeStyles($parentStyle, $fontStyle);
+            $parent->setAttribute('style', $mergedStyle);
+        }
     }
 }
 
-// Function to process HTML and add position: relative to parents of absolutely positioned elements
+function mergeSpanIntoParent($dom) {
+    $xpath = new DOMXPath($dom);
+    
+    // Find all span elements that have a non-span parent
+    $spans = $xpath->query('//span[not(ancestor::span)]/descendant-or-self::span');
+    
+    // Process spans from deepest to shallowest
+    $spansToProcess = [];
+    foreach ($spans as $span) {
+        $spansToProcess[] = $span;
+    }
+    
+    // Sort by depth (deepest first)
+    usort($spansToProcess, function($a, $b) {
+        return getNodeDepth($b) - getNodeDepth($a);
+    });
+    
+    foreach ($spansToProcess as $span) {
+        $parent = $span->parentNode;
+        
+        // Skip if parent is not an element node
+        if ($parent->nodeType !== XML_ELEMENT_NODE) continue;
+        
+        // Merge content
+        $fragment = $dom->createDocumentFragment();
+        while ($span->childNodes->length > 0) {
+            $fragment->appendChild($span->firstChild);
+        }
+        
+        // Replace span with its children
+        $span->parentNode->replaceChild($fragment, $span);
+    }
+}
+
+/**
+ * Get node depth in the DOM tree
+ */
+function getNodeDepth($node) {
+    $depth = 0;
+    while ($node = $node->parentNode) {
+        if ($node->nodeType === XML_ELEMENT_NODE) {
+            $depth++;
+        }
+    }
+    return $depth;
+}
+
+/**
+ * Merge sibling b and i elements into p elements with appropriate styles
+ */
+function mergeFormattingElements($dom) {
+    $xpath = new DOMXPath($dom);
+    
+    // Find all b and i elements
+    $elements = $xpath->query('//b | //i | //strong');
+    $processed = [];
+    
+    foreach ($elements as $element) {
+        // Skip if already processed
+        if (in_array($element, $processed, true)) {
+            continue;
+        }
+        
+        $siblings = [];
+        $current = $element;
+        
+        // Collect all consecutive b or i siblings
+        while ($current) {
+            if($current->nodeType === XML_TEXT_NODE) {
+                $current = $current->nextSibling;
+                continue;
+            }
+            $tagName = strtolower($current->tagName);
+            if (($tagName === 'b' || $tagName === 'i') && !in_array($current, $processed, true)) {
+                $siblings[] = $current;
+                $processed[] = $current;
+            } else {
+                break;
+            }
+            $current = $current->nextSibling;
+            
+            // Skip text nodes that are just whitespace
+            while ($current && $current->nodeType === XML_TEXT_NODE && trim($current->nodeValue) === '') {
+                $current = $current->nextSibling;
+            }
+        }
+        
+        // If we have siblings to merge
+        if (count($siblings) > 1) {
+            $parent = $siblings[0]->parentNode;
+            $p = $dom->createElement('p');
+            $styles = [];
+            
+            // Collect all text content and determine styles
+            $content = '';
+            foreach ($siblings as $sibling) {
+                $tagName = strtolower($sibling->tagName);
+                $styles[] = $tagName === 'b' ? 'font-weight: bold' : 'font-style: italic';
+                $content .= $sibling->textContent . ' ';
+                
+                // Remove the original element
+                $sibling->parentNode->removeChild($sibling);
+            }
+            
+            // Remove trailing space
+            $content = rtrim($content);
+            
+            // Set content and styles
+            $p->nodeValue = $content;
+            $p->setAttribute('style', implode('; ', array_unique($styles)));
+            
+            // Insert the new p element
+            if ($parent) {
+                $parent->insertBefore($p, $current);
+            }
+        }
+    }
+}
+
 function processHtml($htmlFile) {
     // Load the HTML
     $dom = new DOMDocument();
     @$dom->loadHTMLFile($htmlFile, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
 
     $xpath = new DOMXPath($dom);
+
+    // Merge nested fonts
+    mergeNestedFonts($dom);
+
+    // Merge span into parent
+    mergeSpanIntoParent($dom);
+    
+    // Merge sibling b and i elements into p elements
+    mergeFormattingElements($dom);
 
     // Find all elements with position: absolute
     $absoluteElements = $xpath->query("//*[contains(@style, 'position:absolute') or contains(@style, 'position: absolute') or contains(@style, 'position : absolute')]");
@@ -104,6 +261,7 @@ function processHtml($htmlFile) {
         // Remove position:absolute and positioning properties with any spacing and optional semicolons
         $style = preg_replace('/position\s*:\s*absolute\s*;?/i', '', $style);
         $style = preg_replace('/[^-](top|left|right|bottom)\s*:[^;]*;?/i', '', $style);
+        $style = preg_replace('/[^-](width|height)\s*:[^;]*;?/i', '', $style);
         
         // Clean up any remaining double semicolons or trailing spaces
         $style = preg_replace('/;+/', ';', $style);
@@ -122,123 +280,26 @@ function processHtml($htmlFile) {
         $element->removeAttribute('align');
     }
 
+    // Remove class attributes from all elements
+    $allElements = $xpath->query('//*[@class]');
+    foreach ($allElements as $element) {
+        $element->removeAttribute('class');
+    }
+
     // Remove all <br> elements
     $brElements = $xpath->query('//br');
     foreach ($brElements as $br) {
         $br->parentNode->removeChild($br);
     }
 
-    // Process the body element to clean up nested elements
-    $body = $xpath->query('//body')->item(0);
-    if ($body) {
-        // Process each top-level element in the body
-        $children = [];
-        while ($body->firstChild) {
-            $children[] = $body->firstChild;
-            $body->removeChild($body->firstChild);
+    
+    // Remove truly empty elements (no content, no attributes, no children)
+    $allElements = $xpath->query('//*[not(*) and not(normalize-space()) and not(@*)]');
+    foreach ($allElements as $element) {
+        // Skip elements that might have visual representation (like img, br, hr, etc.)
+        if (!in_array(strtolower($element->tagName), ['img', 'br', 'hr', 'input', 'meta', 'link', 'area', 'base', 'col', 'command', 'embed', 'keygen', 'param', 'source', 'track', 'wbr'])) {
+            $element->parentNode->removeChild($element);
         }
-
-        foreach ($children as $child) {
-            $body->appendChild($child);
-            if ($child->nodeType === XML_ELEMENT_NODE) {
-                processElement($child, $dom);
-            }
-        }
-
-        // Function to check if a node contains only whitespace
-        $containsOnlyWhitespace = function($node) use (&$containsOnlyWhitespace) {
-            if ($node->nodeType === XML_TEXT_NODE) {
-                return trim($node->nodeValue) === '';
-            }
-            if ($node->nodeType === XML_ELEMENT_NODE) {
-                foreach ($node->childNodes as $child) {
-                    if (!$containsOnlyWhitespace($child)) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-            return false;
-        };
-
-        // Remove margin and padding from span/font elements
-        $stylingElements = $xpath->query('//span | //font');
-        foreach ($stylingElements as $el) {
-            if ($el->hasAttribute('style')) {
-                $style = $el->getAttribute('style');
-                // Remove margin and padding properties
-                $style = preg_replace('/\s*margin[^:;]*:[^;]+;?/i', '', $style);
-                $style = preg_replace('/\s*padding[^:;]*:[^;]+;?/i', '', $style);
-                // Clean up any remaining double semicolons or trailing spaces
-                $style = preg_replace('/;+/', ';', $style);
-                $style = trim($style, ';\s');
-                
-                if (empty($style)) {
-                    $el->removeAttribute('style');
-                } else {
-                    $el->setAttribute('style', $style);
-                }
-            }
-        }
-
-        // Remove empty font/span elements
-        do {
-            $changed = false;
-            $elements = $xpath->query('//font | //span');
-            foreach ($elements as $element) {
-                if ($containsOnlyWhitespace($element)) {
-                    $parent = $element->parentNode;
-                    if ($parent) {
-                        while ($element->firstChild) {
-                            $parent->insertBefore($element->firstChild, $element);
-                        }
-                        $parent->removeChild($element);
-                        $changed = true;
-                    }
-                }
-            }
-        } while ($changed);
-
-        // Merge sibling spans/fonts with same styles, even if separated by whitespace
-        do {
-            $changed = false;
-            $elements = $xpath->query('//span | //font');
-            foreach ($elements as $element) {
-                $next = $element->nextSibling;
-                
-                // Skip whitespace text nodes
-                while ($next && $next->nodeType === XML_TEXT_NODE && trim($next->nodeValue) === '') {
-                    $next = $next->nextSibling;
-                }
-                
-                if ($next && $next->nodeType === XML_ELEMENT_NODE && 
-                    in_array(strtolower($next->tagName), ['span', 'font'])) {
-                    
-                    // Get styles for both elements
-                    $style1 = $element->getAttribute('style');
-                    $style2 = $next->getAttribute('style');
-                    
-                    // Check if styles match
-                    if ($style1 === $style2) {
-                        // Add a space between elements if there's text content
-                        if ($element->lastChild && $element->lastChild->nodeType === XML_TEXT_NODE) {
-                            $element->lastChild->nodeValue = rtrim($element->lastChild->nodeValue) . ' ';
-                        } else if (trim($element->nodeValue) !== '') {
-                            $element->appendChild(new DOMText(' '));
-                        }
-                        
-                        // Move all children from next element to current element
-                        while ($next->firstChild) {
-                            $element->appendChild($next->firstChild);
-                        }
-                        
-                        // Remove the now-empty next element
-                        $next->parentNode->removeChild($next);
-                        $changed = true;
-                    }
-                }
-            }
-        } while ($changed);
     }
 
     // Save the modified HTML
@@ -258,7 +319,7 @@ try {
     }
 
     // Example usage
-    $inputDocx = '/home/newgen/opt/htdocs/public/docx_parser/ai.docx';  // Change this to your input file
+    $inputDocx = '/home/newgen/opt/htdocs/public/docx_parser/samples/Modern nursing resume.docx';  // Change this to your input file
     $outputDir = '/home/newgen/opt/htdocs/public/docx_parser/output';      // Output directory
 
     if (!file_exists($inputDocx)) {
