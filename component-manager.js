@@ -754,7 +754,7 @@ class ComponentsManager {
       } else {
         // normal html elements
         try {
-          if (this.placeholder && this.selectedElement && doc.querySelector('body').contains(this.selectedElement)) {
+          if (this.placeholder && this.selectedElement && !this.selectedElement.contains(this.placeholder)) {
             this.placeholder.replaceWith(this.selectedElement);
           }
         } catch (error) {
@@ -1055,11 +1055,14 @@ class ComponentsManager {
         return;
       }
 
-      // Find the closest component element if this is a child of a component
       let selectedElement = element;
 
       // If we found a component element and we're not already selecting it
-      if (element.hasAttribute("data-component") && selectedElement !== element) {
+      if (element.hasAttribute("data-component") && ! this.selectedElement.isEqualNode(element)) {
+        const componentDef = this.getComponent(element.getAttribute('data-component'));
+        if(componentDef.onFocus){
+          componentDef.onFocus(this.editor, element, componentDef);
+        }
         selectedElement = element;
       }
 
@@ -2977,6 +2980,16 @@ class ComponentsManager {
   }
 }
 
+(function() {
+  const _add = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    this._listeners = this._listeners || {};
+    this._listeners[type] = this._listeners[type] || [];
+    this._listeners[type].push(listener);
+    _add.call(this, type, listener, options);
+  };
+})();
+
 function cm_essentials_init(componentsManager){
   componentsManager.register(
     new Component({
@@ -3046,14 +3059,9 @@ function cm_essentials_init(componentsManager){
           border: 1px solid transparent;
           background-color: rgba(255, 255, 255, 0.1);
         }
-        
-        .cm-layer:hover {
-          border: 1px dashed #0d6efd;
-        }
-        
+      
         .cm-layer.cm-active {
           border: 1px solid #0d6efd;
-          background-color: rgba(13, 110, 253, 0.05);
           pointer-events: auto;
         }
         
@@ -3111,86 +3119,70 @@ function cm_essentials_init(componentsManager){
       },
       onUpdate: function(propName, newValue, element, prop) {
         if(propName == 'addLayer'){
-          if(element.addLayer){
-            element.addLayer()
-          }
+          const ev = new CustomEvent('add_layer');
+          element.dispatchEvent(ev);
         } else if(propName == 'removeLayer'){
-          if(element.removeLayer){
-            element.removeLayer()
-          }
+          const ev = new CustomEvent('remove_layer');
+          element.dispatchEvent(ev);
         } else if(propName == 'activeLayer'){
-          if (!isNaN(newValue) && element.setActiveLayerIndex) {
-            element.setActiveLayerIndex(newValue);
+          if (!isNaN(newValue)) {
+            const ev = new CustomEvent('set_active_layer_index', { detail: { index: newValue } });
+            element.dispatchEvent(ev);
           }
         } else if(propName == 'layerUp'){
-          if (element.moveLayer) {
-            element.moveLayer('up')
-          }
+          const ev = new CustomEvent('move_layer', { detail: { direction: 'up' } });
+          element.dispatchEvent(ev);
         } else if(propName == 'layerDown'){
-          if (element.moveLayer) {
-            element.moveLayer('down')
-          }
+          const ev = new CustomEvent('move_layer', { detail: { direction: 'down' } });
+          element.dispatchEvent(ev);
         }
       },
-      onInsert: function(editor, element) {
+      onInsert: function(editor, element, component) {
         // Make the container focusable
         element.setAttribute('tabindex', '0');
+
+        const {addLayer, layers, activeLayerIndex} = component.onFocus(editor, element, component);
+  
+        // Initialize with one layer if empty
+        if (Object.keys(layers).length === 0) {
+          addLayer();
+          addLayer();
+        }
         
+        // Update the properties panel when layers change
+        const updateLayerProperties = () => {
+          if (element.updateProperty) {
+            const options = Object.keys(layers).map(zIndex => ({
+              value: zIndex,
+              label: `Layer ${zIndex}`
+            }));
+            
+            element.updateProperty('activeLayer', {
+              options,
+              value: activeLayerIndex
+            });
+          }
+        };
+        
+        // Initial properties update
+        updateLayerProperties();
+      },
+      onFocus: function(editor, element, component){
+        if(element._listeners?.add_layer?.length > 0){
+          return;
+        }
+
         const layersContent = element.querySelector('.cm-layers-content');
         let layers = {};
         let activeLayerIndex = -1;
-        let isResizing = false;
-        
-        // Prevent drag operations during resize
-        element.addEventListener('mousedown', function(e) {
-          // Check if the click is on the resize handle (bottom-right 20x20px area)
-          const rect = element.getBoundingClientRect();
-          const isResizeHandle = 
-            e.clientX > rect.right - 20 && 
-            e.clientY > rect.bottom - 20;
-            
-          if (isResizeHandle) {
-            isResizing = true;
-            e.stopPropagation();
-            return false;
-          }
 
-          return true;
-        });
-        
-        // Reset resize flag when mouse is released
-        document.addEventListener('mouseup', function() {
-          isResizing = false;
-        });
-        
-        // Prevent drag operations during resize
-        element.addEventListener('dragstart', function(e) {
-          if (isResizing) {
-            e.preventDefault();
-            return false;
-          }
-        });
-        
-        // Initialize existing layers
         layersContent.querySelectorAll('.cm-layer').forEach((layer) => {
-          const zIndex = parseInt(layer.style.zIndex || '0', 10);
-          layers[zIndex] = layer;
-          layer.classList.add('cm-inactive');
-        });
-        
-        // Set initial active layer
-        try {
-          activeLayerIndex = parseInt(element.getAttribute('data-prop-activelayer') || '-1', 10);
-          if (isNaN(activeLayerIndex) || activeLayerIndex < 0 || !layers[activeLayerIndex]) {
-            // Find the highest z-index layer
-            const indices = Object.keys(layers).map(Number).sort((a, b) => b - a);
-            activeLayerIndex = indices.length > 0 ? indices[0] : -1;
+          layers[layer.style.zIndex] = layer;
+          if(layer.classList.contains('cm-active')){
+            activeLayerIndex = layer.style.zIndex;
           }
-        } catch (e) {
-          console.error('Error initializing layers:', e);
-          activeLayerIndex = Object.keys(layers).length > 0 ? 0 : -1;
-        }
-  
+        });
+
         function makeCurrentLayerActive() {
           Object.values(layers).forEach((layer) => {
             layer.classList.remove('cm-active');
@@ -3320,43 +3312,63 @@ function cm_essentials_init(componentsManager){
             }
           }
         }
-  
-        // Initialize with one layer if empty
-        if (Object.keys(layers).length === 0) {
-          addLayer();
-          addLayer();
-        }
-        
-        // Expose methods to the element for property panel to use
-        element.addLayer = addLayer;
-        element.removeLayer = removeLayer;
-        element.moveLayer = moveLayer;
-        element.getActiveLayerIndex = () => activeLayerIndex;
-        element.setActiveLayerIndex = (index) => {
-          if (layers[index]) {
+
+        function setActiveLayerIndex(index) {
+          if(layers[index]){
             activeLayerIndex = index;
             makeCurrentLayerActive();
           }
-        };
+        }
+
+        // Expose methods to the element for property panel to use
+        element.addEventListener('add_layer', addLayer);
+        element.addEventListener('remove_layer', removeLayer);
+        element.addEventListener('move_layer', moveLayer);
+        element.addEventListener('set_active_layer_index', (e) => {
+          setActiveLayerIndex(e.detail.index);
+        });
+
+        let isResizing = false;
         
-        // Update the properties panel when layers change
-        const updateLayerProperties = () => {
-          if (element.updateProperty) {
-            const options = Object.keys(layers).map(zIndex => ({
-              value: zIndex,
-              label: `Layer ${zIndex}`
-            }));
+        // Prevent drag operations during resize
+        element.addEventListener('mousedown', function(e) {
+          // Check if the click is on the resize handle (bottom-right 20x20px area)
+          const rect = element.getBoundingClientRect();
+          const isResizeHandle = 
+            e.clientX > rect.right - 40 && 
+            e.clientY > rect.bottom - 40;
             
-            element.updateProperty('activeLayer', {
-              options,
-              value: activeLayerIndex
-            });
+          if (isResizeHandle) {
+            isResizing = true;
+            e.stopPropagation();
+            return false;
           }
-        };
+
+          return true;
+        });
         
-        // Initial properties update
-        updateLayerProperties();
-      }
+        // Prevent drag operations during resize
+        element.addEventListener('dragstart', function(e) {
+          if (isResizing) {
+            e.preventDefault();
+            return false;
+          }
+        });
+
+        // Reset resize flag when mouse is released
+        editor.getDoc().addEventListener('mouseup', function() {
+          isResizing = false;
+        });
+
+        return {
+          addLayer,
+          removeLayer,
+          moveLayer,
+          setActiveLayerIndex,
+          layers,
+          activeLayerIndex
+        };
+      },
     })
   );
 }

@@ -12,6 +12,7 @@ class Component {
    * @param {string} config.category - Component category
    * @param {Function} [config.onInsert] - Called when component is inserted into DOM
    * @param {Function} [config.onUpdate] - Called when component properties are updated
+   * @param {Function} [config.onFocus] - Called when component node is focused
    * @param {Function} [config.onRemove] - Called before component is removed
    * @param {Array<PropertyDefinition>} [config.properties=[]] - Component properties
    */
@@ -26,6 +27,7 @@ class Component {
     onInsert,
     onUpdate,
     onRemove,
+    onFocus,
     properties = {},
     children = {},
   }) {
@@ -48,6 +50,7 @@ class Component {
     this.restriction = restriction || (() => true); // Default restriction allows dropping anywhere
     this.onInsert = onInsert || (() => {});
     this.onUpdate = onUpdate || (() => {});
+    this.onFocus = onFocus || (() => {});
     this.onRemove = onRemove || (() => {});
   }
 }

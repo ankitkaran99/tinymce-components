@@ -567,7 +567,7 @@ function bs5_components_init(componentsManager) {
       category: "Layout",
       content: (props) => {
         return `<div class="${props.colSize} ${props.colSmSize} ${props.colMdSize} ${props.colLgSize} ${props.colXlSize}" data-component-children="default">
-          <!-- Children -->
+          <p>Column</p>
         </div>`;
       },
       editorStyle: `
@@ -638,7 +638,7 @@ function bs5_components_init(componentsManager) {
         },
         colMdSize: {
           type: "select",
-          label: "MediumColumn Size",
+          label: "Medium Column Size",
           options: [
             { value: "", label: "None" },
             { value: "col-md-1", label: "1" },
